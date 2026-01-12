@@ -1,0 +1,14 @@
+torch
+transformers
+peft
+sentence-transformers
+faiss-cpu
+spacy
+networkx
+numpy
+pandas
+rouge
+langchain-text-splitters
+tiktoken
+openai
+
