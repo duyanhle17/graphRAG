@@ -4,7 +4,7 @@ from typing import Optional
 from openai import OpenAI
 
 DEFAULT_MODEL = "moonshotai/kimi-k2-instruct-0905"
-# export NVAPI_KEY="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"
+# export NVAPI_KEY="Tự lấy đi nhé hehe"
 
 
 class KimiGenerator:
