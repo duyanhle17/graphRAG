@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+.venv/
+venv/
+
+# Model weights
+models/
+*.bin
+*.safetensors
+
+# Cache
+nano_graphrag_cache_*/
+
+# Secrets
+.env
+
+# OS
+.DS_Store
+
