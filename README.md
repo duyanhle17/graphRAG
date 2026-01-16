@@ -13,3 +13,6 @@ pipeline with Structure-Aware Tuning (SAT).
 ```bash
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
+
+nhớ import API key: 
+$env:NVAPI_KEY=""
