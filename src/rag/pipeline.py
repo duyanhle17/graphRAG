@@ -1,87 +1,77 @@
 from src.llm.kimi_remote import KimiGenerator
-from src.rag.graph.node_embed import GraphNodeEmbedder
-# from src.rag.graph.clustering import GraphClusterer
-
 import numpy as np
-
+import spacy 
 
 
 class GraphRAGPipeline:
-    def __init__(self, retriever, graph, reasoner, generator=None):
+    def __init__(self, retriever, graph, reasoner=None, generator=None,
+                 node_embeddings=None, clusters=None, chunks=None, chunk_entities=None):
+        import spacy
         self.retriever = retriever
-        self.graph = graph
+        self.graph = graph                  # networkx graph OK
         self.reasoner = reasoner
-        self.generator = generator
+        self.generator = generator or KimiGenerator()
 
-        # 🔹 LLM generator
-        self.generator = KimiGenerator()
+        self.node_embeddings = node_embeddings
+        self.clusters = clusters
 
-        # 🔹 Graph representation
-        self.node_embedder = GraphNodeEmbedder(
-            dimensions=128,
-            walk_length=40,
-            num_walks=10
-        )
-        # self.clusterer = GraphClusterer(method="greedy")
+        self.chunks = chunks
+        self.chunk_entities = chunk_entities
 
-        # sẽ được build sau
-        self.node_embeddings = None
-        self.clusters = None
+        # ✅ pipeline tự có NLP, không cần self.graph.nlp nữa
+        self.nlp = spacy.load("en_core_web_sm")
+        
+    def _get_chunks_containing_entity(self, entity: str):
+        if self.chunks is None or self.chunk_entities is None:
+            return []
+        results = []
+        for chunk, ents in zip(self.chunks, self.chunk_entities):
+            # ents có thể là set/list
+            if entity in ents:
+                results.append(chunk)
+        return results
 
-    def build_graph_representation(self):
-        """
-        Run once after KG is built
-        """
-        # # 1️⃣ Node embedding
-        # self.node_embeddings = self.node_embedder.fit(self.graph.kg)
 
-        # # 2️⃣ Graph clustering
-        # self.clusters = self.clusterer.cluster(self.graph.kg)
-    
     def _find_relevant_clusters(self, query: str):
-        """
-        Return clusters that contain entities mentioned in query
-        """
-        doc = self.graph.nlp(query)
+        if not self.clusters:
+            return []
+        doc = self.nlp(query)   # ✅ dùng self.nlp
         query_entities = {ent.text for ent in doc.ents}
+        if not query_entities:
+            return []
 
         matched_clusters = []
         for cluster in self.clusters:
             if any(node in query_entities for node in cluster):
                 matched_clusters.append(cluster)
-
         return matched_clusters
 
     def _expand_context_from_clusters(self, clusters):
-        """
-        Convert node clusters to text context
-        """
         contexts = []
-
         for cluster in clusters:
             for node in cluster:
-                # node là entity → lấy các chunk chứa entity đó
-                contexts.extend(
-                    self.graph.get_chunks_containing_entity(node)
-                )
+                contexts.extend(self._get_chunks_containing_entity(node))  # ✅
+        # dedupe giữ thứ tự
+        seen = set()
+        out = []
+        for c in contexts:
+            if c not in seen:
+                out.append(c)
+                seen.add(c)
+        return out
 
-        return list(set(contexts))  # remove duplicates
-    
     def _find_similar_graph_nodes(self, query: str, top_k: int = 5):
         """
         Find graph nodes similar to query entities using node embeddings
         """
-        if self.node_embeddings is None:
+        if not self.node_embeddings:
             return []
 
-        # 1️⃣ Extract entities from query
-        doc = self.graph.nlp(query)
+        doc = self.nlp(query)
         query_entities = [ent.text for ent in doc.ents]
-
         if not query_entities:
             return []
 
-        # 2️⃣ Collect embeddings of query-matched nodes
         matched_vectors = []
         for ent in query_entities:
             if ent in self.node_embeddings:
@@ -92,80 +82,79 @@ class GraphRAGPipeline:
 
         query_vec = np.mean(matched_vectors, axis=0)
 
-        # 3️⃣ Cosine similarity in graph embedding space
         sims = []
+        qn = np.linalg.norm(query_vec) + 1e-9
         for node, vec in self.node_embeddings.items():
-            score = np.dot(query_vec, vec) / (
-                np.linalg.norm(query_vec) * np.linalg.norm(vec) + 1e-9
-            )
+            score = float(np.dot(query_vec, vec) / (qn * (np.linalg.norm(vec) + 1e-9)))
             sims.append((node, score))
 
         sims.sort(key=lambda x: x[1], reverse=True)
         return [node for node, _ in sims[:top_k]]
 
     def _expand_context_with_node_similarity(self, query: str):
-        """
-        Expand context using node embedding similarity
-        """
         similar_nodes = self._find_similar_graph_nodes(query)
-
         chunks = []
         for node in similar_nodes:
-            chunks.extend(
-                self.graph.get_chunks_containing_entity(node)
-            )
-
-        return list(set(chunks))
+            chunks.extend(self._get_chunks_containing_entity(node))  # ✅
+        # dedupe
+        seen = set()
+        out = []
+        for c in chunks:
+            if c not in seen:
+                out.append(c)
+                seen.add(c)
+        return out
 
 
     def answer(self, query: str) -> str:
-        # 1️⃣ Semantic retrieval (baseline)
+        # 1) semantic retrieval
         semantic_chunks = self.retriever.retrieve(query, top_k=5)
 
-        # 2️⃣ Graph-aware expansion via node embedding similarity
+        # 2) cluster-aware expansion
+        cluster_chunks = []
+        if self.clusters:
+            rel_clusters = self._find_relevant_clusters(query)
+            cluster_chunks = self._expand_context_from_clusters(rel_clusters)
+
+        # 3) node2vec similarity expansion
         graph_chunks = self._expand_context_with_node_similarity(query)
 
-        # 3️⃣ Merge & de-duplicate
+        # 4) merge (semantic -> cluster -> node2vec)
         all_chunks = []
         seen = set()
-        for ch in semantic_chunks + graph_chunks:
+        for ch in semantic_chunks + cluster_chunks + graph_chunks:
             if ch not in seen:
                 all_chunks.append(ch)
                 seen.add(ch)
 
-        # 4️⃣ Truncate context
+        # 5) truncate
         context = "\n".join(all_chunks[:8])
 
-        # 5️⃣ SAT reasoning (local)
-        # reasoning = self.reasoner(query, context)
-
-        # 2️⃣ Nếu có reasoner (Qwen local) → dùng
+        # 6) if reasoner exists -> reasoning + generator
         if self.reasoner is not None:
             reasoning = self.reasoner(query, context)
-
             prompt = f"""
-    CONTEXT:
-    {context}
+CONTEXT:
+{context}
 
-    QUESTION:
-    {query}
+QUESTION:
+{query}
 
-    REASONING:
-    {reasoning}
+REASONING:
+{reasoning}
 
-    ANSWER:
-    """
+ANSWER:
+"""
             return self.generator.generate(prompt)
 
-        # 3️⃣ Nếu KHÔNG có reasoner → generator trả lời trực tiếp
-        else:
-            prompt = f"""
-    CONTEXT:
-    {context}
+        # 7) else generator direct
+        prompt = f"""
+CONTEXT:
+{context}
 
-    QUESTION:
-    {query}
+QUESTION:
+{query}
 
-    ANSWER:
-    """
-            return self.generator.generate(prompt)
+ANSWER:
+"""
+        return self.generator.generate(prompt)
