@@ -15,4 +15,5 @@ pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 
 nhớ import API key: 
-$env:NVAPI_KEY=""
+window:   $env:NVAPI_KEY=""
+macOS:    export NVAPI_KEY=""
